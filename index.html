@@ -66,12 +66,13 @@
         const gltf = await new GLTFLoader().loadAsync(MODEL_URL);
         const modelo = gltf.scene;
 
-        modelo.scale.set(1, 1, 1);     // tamaño: si se ve enorme o diminuto, cambia estos números
+        modelo.scale.set(0.4, 0.4, 0.4);     // tamaño: si se ve enorme o diminuto, cambia estos números
+        modelo.rotation.x = -Math.PI/2; //rotar -90 grados(PI son 180)
         modelo.position.set(0, 0, 0);  // posición: mueve en X, Y, Z hasta que encaje en tu cara
 
         // El "anchor" es un punto fijo de la cara que se mueve con ella.
-        // El 168 está entre los ojos. Otros: 1 = nariz, 10 = frente.
-        const anchor = mindarThree.addAnchor(168);
+        // El 1 está en la nariz. 
+        const anchor = mindarThree.addAnchor(1);   
 
         // Metemos el modelo dentro del anchor para que siga a tu cara
         anchor.group.add(modelo);
