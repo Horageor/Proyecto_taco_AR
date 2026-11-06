@@ -2,6 +2,18 @@
   <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
+    <!-- Muestra los errores en pantalla (útil para depurar en el celular) -->
+<script>
+  function mostrarError(texto) {
+    const d = document.createElement('pre');
+    d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#fff;color:red;font-size:12px;white-space:pre-wrap;margin:0;padding:8px';
+    d.textContent = texto;
+    document.documentElement.appendChild(d);
+  }
+  window.addEventListener('error', (e) => mostrarError('Error: ' + e.message));
+  window.addEventListener('unhandledrejection', (e) => mostrarError('Promesa rechazada: ' + (e.reason && e.reason.message ? e.reason.message : e.reason)));
+</script>
+
     <!-- Busca las librerias de MindAR -->
     <script type="importmap">
     {
