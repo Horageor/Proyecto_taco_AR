@@ -1,19 +1,182 @@
 <html>
   <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-face-aframe.prod.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- Busca las librerias de MindAR -->
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+        "mindar-face-three":"https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-face-three.prod.js"
+      }
+    }
+    </script>
+
+    <!-- Código JavaScript -->
+    <script type="module">
+      import * as THREE from 'three';                                // motor 3D
+      import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'; // carga archivos .glb
+      import { MindARThree } from 'mindar-face-three';               // detecta la cara con la cámara
+
+      // Ruta del modelo, tiene que ser glb y va en la carpeta de assets del repo
+      const MODEL_URL = "assets/taco.glb";
+
+      // Los índices son los números de los puntos del face mesh (468 puntos en total).
+      // Cada número es un punto de la cara. Estos son los del contorno de los ojos y los labios.
+      const OJO_IZQ = [33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246];
+      const OJO_DER = [362,382,381,380,374,373,390,249,263,466,388,387,386,385,384,398];
+      const LABIOS  = [61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185,
+                       78,95,88,178,87,14,317,402,318,324,308,415,310,311,312,13,82,81,80,191];
+
+      // Los junto en un Set para buscar rápido si un punto pertenece a ojos o boca
+      const HUECOS = new Set([...OJO_IZQ, ...OJO_DER, ...LABIOS]);
+
+      let mindarThree = null; // sistema de MindAR (cámara + detección de cara)
+      let ojosBoca = null;    // mesh que muestra tus ojos y tu boca encima del modelo
+
+      const setup = async () => {
+
+        // Crea el sistema de MindAR: abre la cámara y la muestra dentro del #container
+        mindarThree = new MindARThree({
+          container: document.querySelector("#container"),
+        });
+
+        // MindAR nos da lo básico de three.js ya armado
+        const { renderer, scene, camera } = mindarThree;
+
+        // Luz para que el modelo 3D se vea con color y volumen (sin luz se ve negro)
+        const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+        scene.add(light);
+
+        // MODELO 3D
+        // Carga tu archivo .glb
+        const gltf = await new GLTFLoader().loadAsync(MODEL_URL);
+        const modelo = gltf.scene;
+
+        modelo.scale.set(1, 1, 1);     // tamaño: si se ve enorme o diminuto, cambia estos números
+        modelo.position.set(0, 0, 0);  // posición: mueve en X, Y, Z hasta que encaje en tu cara
+
+        // El "anchor" es un punto fijo de la cara que se mueve con ella.
+        // El 168 está entre los ojos. Otros: 1 = nariz, 10 = frente.
+        const anchor = mindarThree.addAnchor(168);
+
+        // Metemos el modelo dentro del anchor para que siga a tu cara
+        anchor.group.add(modelo);
+
+        // B) MESH DE OJOS Y BOCA
+        // Crea una malla con la forma de tu cara (468 puntos, muchos triángulos)
+        ojosBoca = mindarThree.addFaceMesh();
+
+        // Cada triángulo se define con 3 índices, uno por cada punto
+        const idx = ojosBoca.geometry.index.array;
+        const filtrado = [];
+
+        // Recorre los triángulos de 3 en 3
+        for (let i = 0; i < idx.length; i += 3) {
+          // Me quedo solo con los triángulos cuyos 3 puntos son de ojos o boca
+          if (HUECOS.has(idx[i]) && HUECOS.has(idx[i+1]) && HUECOS.has(idx[i+2])) {
+            filtrado.push(idx[i], idx[i+1], idx[i+2]);
+          }
+        }
+
+        // Reemplazo los triángulos originales por solo los de ojos y boca
+        ojosBoca.geometry.setIndex(filtrado);
+
+        // Convierte el video de la cámara en una textura que three.js puede usar
+        const videoTex = new THREE.VideoTexture(mindarThree.video);
+
+        // Material personalizado (shader): en vez de pintar un color,
+        // pinta la parte del video que corresponde a esa posición en pantalla.
+        ojosBoca.material = new THREE.ShaderMaterial({
+          uniforms: {
+            uVideo: { value: videoTex },              // el video como textura
+            uRes:   { value: new THREE.Vector2() },   // tamaño del canvas (se actualiza en el loop)
+            uVid:   { value: new THREE.Vector2(1,1) } // tamaño real del video (se llena al iniciar)
+          },
+
+          // Vertex shader: coloca cada punto del mesh en su lugar de la pantalla
+          vertexShader: `
+            void main() {
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }`,
+
+          // Fragment shader: decide el color de cada pixel
+          fragmentShader: `
+            uniform sampler2D uVideo;
+            uniform vec2 uRes;
+            uniform vec2 uVid;
+            void main() {
+              // El video se muestra con "cover": llena el canvas y recorta lo que sobra.
+              // Aquí calculo qué tamaño ocupa el video en pantalla y cuánto se desplaza.
+              float s = max(uRes.x / uVid.x, uRes.y / uVid.y);
+              vec2 shown = uVid * s;
+              vec2 offset = (uRes - shown) * 0.5;
+
+              // posición del pixel en pantalla, convertida a coordenadas del video (0..1)
+              vec2 uv = (gl_FragCoord.xy - offset) / shown;
+
+              // color del video en esa misma posición = tus ojos y tu boca reales
+              gl_FragColor = texture2D(uVideo, uv);
+            }`,
+
+          depthTest: false,   // ignora la profundidad, así nunca lo tapa el modelo
+          depthWrite: false,  // no escribe profundidad
+        });
+
+        // renderOrder alto = se dibuja al final, o sea, encima de todo
+        ojosBoca.renderOrder = 999;
+
+        scene.add(ojosBoca);
+      };
+
+      //ARRANCAR
+      const start = async () => {
+        // Prepara la escena solo la primera vez
+        if (!mindarThree) {
+          await setup();
+        }
+
+        // Enciende la cámara y empieza la detección de la cara
+        await mindarThree.start();
+
+        const { renderer, scene, camera } = mindarThree;
+
+        // Ya con la cámara encendida, guardo el tamaño real del video para el shader
+        ojosBoca.material.uniforms.uVid.value.set(
+          mindarThree.video.videoWidth,
+          mindarThree.video.videoHeight
+        );
+
+        // Este loop se ejecuta en cada frame (unas 30-60 veces por segundo)
+        renderer.setAnimationLoop(() => {
+          // Actualiza el tamaño del canvas que usa el shader
+          renderer.getDrawingBufferSize(ojosBoca.material.uniforms.uRes.value);
+          // Dibuja la escena
+          renderer.render(scene, camera);
+        });
+      };
+
+      // Ejecuta todo
+      start();
+    </script>
+
+    <!-- CSS -->
+    <style>
+      body {
+        margin: 0;
+      }
+      #container {
+        width: 100vw;
+        height: 100vh;
+        position: relative;
+        overflow: hidden;
+      }
+    </style>
   </head>
   <body>
-    <a-scene mindar-face embedded color-space="sRGB" renderer="colorManagement: true, physicallyCorrectLights" vr-mode-ui="enabled: false" device-orientation-permission-ui="enabled: false">
-      <a-assets>
-	<a-asset-item id="glassesModel" src="https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.2.5/examples/face-tracking/assets/glasses/scene.gltf"></a-asset-item>
-      </a-assets>
-
-      <a-camera active="false" position="0 0 0"></a-camera>
-      <a-entity mindar-face-target="anchorIndex: 168">
-	<a-gltf-model rotation="0 0 0" position="0 0 0" scale="0.01 0.01 0.01" src="#glassesModel"></a-gltf-model>
-      </a-entity>
-    </a-scene>
+    <!-- Aquí MindAR mete el video de la cámara y el canvas 3D -->
+    <div id="container">
+    </div>
   </body>
 </html>
