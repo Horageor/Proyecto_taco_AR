@@ -95,14 +95,11 @@
         // Reemplazo los triángulos originales por solo los de ojos y boca
         ojosBoca.geometry.setIndex(filtrado);
 
-        // Convierte el video de la cámara en una textura que three.js puede usar
-        const videoTex = new THREE.VideoTexture(mindarThree.video);
-
         // Material personalizado (shader): en vez de pintar un color,
         // pinta la parte del video que corresponde a esa posición en pantalla.
         ojosBoca.material = new THREE.ShaderMaterial({
           uniforms: {
-            uVideo: { value: videoTex },              // el video como textura
+            uVideo: { value: null },              // el video como textura
             uRes:   { value: new THREE.Vector2() },   // tamaño del canvas (se actualiza en el loop)
             uVid:   { value: new THREE.Vector2(1,1) } // tamaño real del video (se llena al iniciar)
           },
@@ -153,6 +150,9 @@
         await mindarThree.start();
 
         const { renderer, scene, camera } = mindarThree;
+        
+        // Ya con la cámara encendida existe el video: lo convierto en textura para el shader
+        ojosBoca.material.uniforms.uVideo.value = new THREE.VideoTexture(mindarThree.video);
 
         // Ya con la cámara encendida, guardo el tamaño real del video para el shader
         ojosBoca.material.uniforms.uVid.value.set(
