@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Arma tu taco</title>
+
+    <!-- 0) MOSTRAR ERRORES EN PANTALLA (útil para depurar en el celular) -->
+    <script>
+      function mostrarError(texto) {
+        const d = document.createElement('pre');
+        d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#fff;color:red;font-size:12px;white-space:pre-wrap;margin:0;padding:8px';
+        d.textContent = texto;
+        document.documentElement.appendChild(d);
+      }
+      window.addEventListener('error', (e) => mostrarError('Error: ' + e.message));
+      window.addEventListener('unhandledrejection', (e) => mostrarError('Promesa rechazada: ' + (e.reason && e.reason.message ? e.reason.message : e.reason)));
+    </script>
+
+    <!-- 1) IMPORT MAP: le dice al navegador de dónde bajar cada librería -->
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+        "mindar-face-three":"https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-face-three.prod.js"
+      }
+    }
+    </script>
+
+    <!-- 2) CÓDIGO JAVASCRIPT -->
+    <script type="module">
+      import * as THREE from 'three';                                  // motor 3D
+      import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'; // carga archivos .glb
+      import { MindARThree } from 'mindar-face-three';                 // detecta la cara con la cámara
+
+      // =========================================================
+      // CONFIGURACIÓN (aquí cambias lo que necesites ajustar)
+      // =========================================================
+
+      // Carpeta donde están los .glb en tu repo (con "/" al final)
+      const CARPETA_MODELOS = "assets/";
+
+      // Punto de la cara donde se pega el taco: 1 = nariz, 168 = entre los ojos, 10 = frente
+      const ANCHOR = 1;
+
+      // Tamaño, giro y posición del taco. Pon aquí los valores que ya te funcionaron.
+      // Puedes probar tamaños sin editar el archivo: tu-pagina/index.html?escala=0.5
+const ESCALA = Number(new URLSearchParams(location.search).get("escala")) || 0.1;
+      const ROTACION_X = Math.PI / 2;            // gira el taco para que mire a la cámara
+      const POSICION = new THREE.Vector3(0, 0, 0);
+
+      // Lista de ingredientes (emoji, y el nombre EXACTO que lleva en el archivo .glb).
+      // OJO: el ORDEN de esta lista es el orden en que aparecen en el nombre del archivo:
+      // taco_Carne_Cebolla_Aguacate_Pimiento_Salsa.glb
+      const INGREDIENTES = [
+        { id: "Carne",    emoji: "🥩" },
+        { id: "Cebolla",  emoji: "🧅" },
+        { id: "Aguacate", emoji: "🥑" },
+        { id: "Pimiento", emoji: "🫑" },
+        { id: "Salsa",    emoji: "🌶️" },
+      ];
+
+      // Los índices son los números de los puntos del face mesh (468 puntos en total).
+      // Cada número es un punto de la cara. Estos son los del contorno de los ojos y los labios.
+      const OJO_IZQ = [33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246];
+      const OJO_DER = [362,382,381,380,374,373,390,249,263,466,388,387,386,385,384,398];
+      const LABIOS  = [61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185,
+                       78,95,88,178,87,14,317,402,318,324,308,415,310,311,312,13,82,81,80,191];
+
+      // Los junto en un Set para buscar rápido si un punto pertenece a ojos o boca
+      const HUECOS = new Set([...OJO_IZQ, ...OJO_DER, ...LABIOS]);
+
+      // =========================================================
+      // VARIABLES DE ESTADO (lo que cambia mientras se usa la página)
+      // =========================================================
+
+      const seleccion = new Set();   // ingredientes activos ahora (vacío = tortilla sola)
+      let mindarThree = null;        // sistema de MindAR (cámara + detección de cara)
+      let anchor = null;             // punto de la cara donde va el taco
+      let ojosBoca = null;           // mesh invisible que hace huecos en el taco para tus ojos y tu boca
+      let modeloActual = null;       // el taco que se está mostrando ahora
+      let numeroPeticion = 0;        // contador para ignorar cargas viejas (ver mostrarTaco)
+
+      const loader = new GLTFLoader();
+      const cache = new Map();       // nombre de archivo -> modelo ya cargado (para no bajarlo dos veces)
+
+      // =========================================================
+      // 1) ELEGIR Y CARGAR LA VERSIÓN CORRECTA DEL TACO
+      // =========================================================
+
+      // Convierte los ingredientes activos en el nombre del archivo.
+      // Ej: {Salsa, Carne} -> "taco_Carne_Salsa.glb" (siempre en el orden de INGREDIENTES)
+      function nombreArchivo(conjunto) {
+        const activos = INGREDIENTES.filter((ing) => conjunto.has(ing.id)).map((ing) => ing.id);
+        return activos.length > 0 ? `taco_${activos.join("_")}.glb` : "taco_solo_tortilla.glb";
+      }
+
+      // Carga un .glb una sola vez y lo guarda en el cache.
+      // Devuelve una PROMESA: algo que "te avisa cuando termine" la descarga.
+      function cargarVariante(nombre) {
+        if (!cache.has(nombre)) {
+          const promesa = loader.loadAsync(CARPETA_MODELOS + nombre)
+            .then((gltf) => {
+              const modelo = gltf.scene;
+              modelo.scale.setScalar(ESCALA);      // mismo tamaño para todas las versiones
+              modelo.rotation.x = ROTACION_X;      // mismo giro
+              modelo.position.copy(POSICION);      // misma posición
+
+              // El taco no se dibuja donde está el "agujero" de ojos y boca
+              modelo.traverse((o) => {
+                if (!o.isMesh) return;
+                for (const m of [].concat(o.material)) {
+                  m.stencilWrite = true;
+                  m.stencilRef = 1;
+                  m.stencilFunc = THREE.NotEqualStencilFunc;
+                  m.needsUpdate = true;
+                }
+              });
+              return modelo;
+            })
+            .catch((err) => {
+              cache.delete(nombre);                // si falló, que se pueda reintentar después
+              throw err;
+            });
+          cache.set(nombre, promesa);
+        }
+        return cache.get(nombre);
+      }
+
+      // Cambia el taco que se ve en la cara por el que corresponde a los ingredientes elegidos
+      async function mostrarTaco() {
+        const nombre = nombreArchivo(seleccion);
+        const estado = document.querySelector("#estado");
+
+        // Cada llamada recibe un número. Si el usuario toca otro ingrediente mientras
+        // esta carga todavía no termina, la carga vieja se descarta al terminar.
+        const miPeticion = ++numeroPeticion;
+
+        if (!cache.has(nombre)) estado.hidden = false;  // solo avisa "cargando" si hay que descargar
+
+        try {
+          const modelo = await cargarVariante(nombre);
+          if (miPeticion !== numeroPeticion) return;    // ya hay una petición más nueva
+
+          if (modeloActual) anchor.group.remove(modeloActual); // quita el taco anterior
+          anchor.group.add(modelo);                            // pone el nuevo
+          modeloActual = modelo;
+
+          precargarVecinos();
+        } catch (err) {
+          if (miPeticion === numeroPeticion) {
+            window.mostrarError("No pude cargar " + nombre + ": " + ((err && err.message) || err));
+          }
+        } finally {
+          if (miPeticion === numeroPeticion) estado.hidden = true;
+        }
+      }
+
+      // Descarga en segundo plano las versiones a las que puedes llegar con UN toque
+      // (agregar o quitar un ingrediente), para que el cambio se sienta instantáneo.
+      function precargarVecinos() {
+        for (const ing of INGREDIENTES) {
+          const vecino = new Set(seleccion);
+          if (vecino.has(ing.id)) vecino.delete(ing.id); else vecino.add(ing.id);
+          cargarVariante(nombreArchivo(vecino)).catch(() => {});
+        }
+      }
+
+      // =========================================================
+      // 2) BOTONES DE INGREDIENTES (lado derecho de la pantalla)
+      // =========================================================
+
+      function crearBotones() {
+        const panel = document.querySelector("#ingredientes");
+
+        for (const ing of INGREDIENTES) {
+          const boton = document.createElement("button");
+          boton.className = "ingrediente";
+          boton.setAttribute("aria-pressed", "false");
+          boton.innerHTML = `<span class="emoji">${ing.emoji}</span><span>${ing.id}</span>`;
+
+          // Al tocar: si el ingrediente estaba, lo quita; si no estaba, lo agrega
+          boton.addEventListener("click", () => {
+            if (seleccion.has(ing.id)) seleccion.delete(ing.id); else seleccion.add(ing.id);
+
+            const activo = seleccion.has(ing.id);
+            boton.classList.toggle("activo", activo);            // cambia el color del botón
+            boton.setAttribute("aria-pressed", String(activo));
+
+            mostrarTaco();                                       // actualiza el taco en tu cara
+          });
+
+          panel.appendChild(boton);
+        }
+      }
+
+      // =========================================================
+      // 3) PREPARAR MINDAR, LUZ Y EL MESH DE OJOS Y BOCA
+      // =========================================================
+
+      function setup() {
+        // Crea el sistema de MindAR: abre la cámara y la muestra dentro del #container
+        mindarThree = new MindARThree({
+          container: document.querySelector("#container"),
+        });
+
+        // MindAR nos da la escena de three.js ya armada
+        const { scene } = mindarThree;
+
+        // Luz para que el modelo 3D se vea con color y volumen (sin luz se ve negro)
+        scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1));
+
+        // El "anchor" es un punto fijo de la cara que se mueve con ella.
+        // El taco se mete dentro de su "group" (ver mostrarTaco).
+        anchor = mindarThree.addAnchor(ANCHOR);
+
+        // --- MESH DE OJOS Y BOCA (lo que se ve encima del taco) ---
+
+        // Crea una malla con la forma de tu cara (468 puntos, muchos triángulos)
+        ojosBoca = mindarThree.addFaceMesh();
+
+        // Cada triángulo se define con 3 índices, uno por cada punto
+        const idx = ojosBoca.geometry.index.array;
+        const filtrado = [];
+
+        // Recorre los triángulos de 3 en 3 y se queda solo con los de ojos y boca
+        for (let i = 0; i < idx.length; i += 3) {
+          // Basta con que 2 de los 3 puntos sean de ojos/boca: así el hueco queda un poco
+          // más grande que el ojo y aguanta el pequeño retraso del seguimiento al moverte
+          const dentro = HUECOS.has(idx[i]) + HUECOS.has(idx[i+1]) + HUECOS.has(idx[i+2]);
+          if (dentro >= 2) {
+            filtrado.push(idx[i], idx[i+1], idx[i+2]);
+          }
+        }
+        ojosBoca.geometry.setIndex(filtrado);
+
+        // Material "agujero": NO pinta nada (colorWrite:false), solo marca en el
+        // stencil buffer los pixeles donde hay ojos y boca. Después el taco se
+        // dibuja SOLO donde no hay marca, y por esos huecos se ve el video real.
+        // Para ver dónde están los huecos: agrega ?debug=1 a la URL (se pintan de magenta)
+        const DEBUG = new URLSearchParams(location.search).has("debug");
+        ojosBoca.material = new THREE.MeshBasicMaterial({
+          color: 0xff00ff,
+          colorWrite: DEBUG,
+          depthWrite: false,
+          depthTest: false,
+          stencilWrite: true,
+          stencilRef: 1,
+          stencilFunc: THREE.AlwaysStencilFunc,
+          stencilZPass: THREE.ReplaceStencilOp,
+        });
+
+        // renderOrder bajo = se dibuja ANTES que el taco (para marcar el stencil primero)
+        ojosBoca.renderOrder = -1;
+        scene.add(ojosBoca);
+      }
+
+      // =========================================================
+      // 4) TOMAR LA FOTO
+      // =========================================================
+      // La pantalla está hecha de DOS capas separadas: el <video> de la cámara (atrás)
+      // y el <canvas> del 3D (adelante, transparente). Para la foto las juntamos
+      // dibujando las dos, en el mismo orden, sobre un canvas nuevo.
+
+      // ¿Este elemento se ve en espejo? (MindAR voltea la cámara como selfie).
+      // Revisa el elemento y sus "padres", porque el volteo puede estar en cualquiera.
+      function estaEspejado(el) {
+        let espejos = 0;
+        for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
+          const t = getComputedStyle(e).transform;
+          if (t && t !== 'none' && new DOMMatrixReadOnly(t).a < 0) espejos++;
+        }
+        return espejos % 2 === 1;
+      }
+
+      // Dibuja un elemento (video o canvas) en la misma posición y tamaño en que se ve en pantalla
+      function dibujarElemento(ctx, el, origen, escala) {
+        const r = el.getBoundingClientRect();
+        const x = (r.left - origen.left) * escala;
+        const y = (r.top - origen.top) * escala;
+        const w = r.width * escala;
+        const h = r.height * escala;
+
+        ctx.save();
+        if (estaEspejado(el)) {
+          ctx.translate(x + w, y);   // voltea horizontalmente igual que en pantalla
+          ctx.scale(-1, 1);
+          ctx.drawImage(el, 0, 0, w, h);
+        } else {
+          ctx.drawImage(el, x, y, w, h);
+        }
+        ctx.restore();
+      }
+
+      async function tomarFoto() {
+        if (!mindarThree || !mindarThree.video) return;   // la cámara todavía no arranca
+        const { renderer, scene, camera, video } = mindarThree;
+
+        // Dibuja un frame justo ahora, para que el 3D esté actualizado al copiarlo
+        renderer.render(scene, camera);
+
+        const lienzo = renderer.domElement;
+        const origen = document.querySelector("#container").getBoundingClientRect();
+        const escala = lienzo.width / lienzo.getBoundingClientRect().width; // conserva la calidad
+
+        const salida = document.createElement("canvas");
+        salida.width = Math.round(origen.width * escala);
+        salida.height = Math.round(origen.height * escala);
+        const ctx = salida.getContext("2d");
+
+        dibujarElemento(ctx, video, origen, escala);   // capa 1: cámara
+        dibujarElemento(ctx, lienzo, origen, escala);  // capa 2: taco + ojos y boca
+
+        // Efecto de flash blanco
+        const flash = document.querySelector("#flash");
+        flash.classList.add("activo");
+        setTimeout(() => flash.classList.remove("activo"), 120);
+
+        // Convierte el canvas en un archivo PNG
+        const blob = await new Promise((resolve) => salida.toBlob(resolve, "image/png"));
+        const archivo = new File([blob], "mi-taco.png", { type: "image/png" });
+
+        // En el celular abre el menú de compartir (ahí puedes guardarla en la galería)
+        if (navigator.canShare && navigator.canShare({ files: [archivo] })) {
+          try {
+            await navigator.share({ files: [archivo], title: "Mi taco" });
+            return;
+          } catch (e) {
+            if (e.name === "AbortError") return;   // cerraste el menú, no hay que hacer nada más
+          }
+        }
+
+        // Si no se puede compartir, la descarga directo
+        const enlace = document.createElement("a");
+        enlace.href = URL.createObjectURL(blob);
+        enlace.download = "mi-taco.png";
+        enlace.click();
+        setTimeout(() => URL.revokeObjectURL(enlace.href), 1000);
+      }
+
+      // =========================================================
+      // 5) ARRANCAR
+      // =========================================================
+      async function start() {
+        crearBotones();   // botones de la derecha
+        setup();          // MindAR, luz y mesh de ojos y boca
+
+        // Enciende la cámara y empieza la detección de la cara
+        await mindarThree.start();
+
+        const { renderer, scene, camera } = mindarThree;
+
+        // El stencil buffer es necesario para los huecos de ojos y boca
+        const attrs = renderer.getContext().getContextAttributes();
+        if (!attrs || !attrs.stencil) mostrarError("Este navegador no creó stencil buffer: los ojos y la boca no se van a ver.");
+
+        // Muestra el primer taco (tortilla sola)
+        mostrarTaco();
+
+        // Este loop se ejecuta en cada frame (unas 30-60 veces por segundo)
+        renderer.setAnimationLoop(() => {
+          renderer.render(scene, camera);
+        });
+      }
+
+      document.querySelector("#btn-foto").addEventListener("click", tomarFoto);
+      start();
+    </script>
+
+    <!-- 3) CSS -->
+    <style>
+      html { background: #000; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        font-family: system-ui, sans-serif;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #container {
+        width: 100vw;
+        height: 100vh;
+        height: 100dvh;
+        position: relative;
+        overflow: hidden;
+        /* Crea su propia "capa" para que el video (que MindAR manda atrás con z-index
+           negativo) se pinte dentro del contenedor y no quede tapado por el fondo negro */
+        isolation: isolate;
+      }
+
+      /* Columna de ingredientes, pegada al lado derecho y centrada en vertical */
+      #ingredientes {
+        position: fixed;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        z-index: 10;
+      }
+      .ingrediente {
+        width: 66px;
+        padding: 6px 0;
+        border: 2px solid rgba(255,255,255,.7);
+        border-radius: 16px;
+        background: rgba(0,0,0,.45);
+        color: #fff;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        font-size: 11px;
+        touch-action: manipulation;
+      }
+      .ingrediente .emoji { font-size: 26px; line-height: 1; }
+      .ingrediente.activo {            /* ingrediente seleccionado */
+        background: #ff9f1c;
+        border-color: #fff;
+        color: #000;
+        transform: scale(1.08);
+      }
+
+      /* Botón de la foto, abajo al centro */
+      #btn-foto {
+        position: fixed;
+        bottom: max(24px, env(safe-area-inset-bottom));
+        left: 50%;
+        transform: translateX(-50%);
+        width: 72px;
+        height: 72px;
+        border-radius: 50%;
+        border: 5px solid #fff;
+        background: rgba(255,255,255,.25);
+        font-size: 30px;
+        z-index: 10;
+        touch-action: manipulation;
+      }
+      #btn-foto:active { transform: translateX(-50%) scale(.92); }
+
+      /* Aviso "cargando" arriba */
+      #estado {
+        position: fixed;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        padding: 6px 12px;
+        border-radius: 20px;
+        background: rgba(0,0,0,.6);
+        color: #fff;
+        font-size: 13px;
+        z-index: 10;
+      }
+
+      /* Flash blanco al tomar la foto */
+      #flash {
+        position: fixed;
+        inset: 0;
+        background: #fff;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity .4s;
+        z-index: 20;
+      }
+      #flash.activo { opacity: .85; transition: none; }
+    </style>
+  </head>
+  <body>
+    <!-- Aquí MindAR mete el video de la cámara y el canvas 3D -->
+    <div id="container"></div>
+
+    <!-- Interfaz (queda fuera del container para que NO salga en la foto) -->
+    <div id="ingredientes"></div>
+    <div id="estado" hidden>Cargando taco…</div>
+    <button id="btn-foto" aria-label="Tomar foto">📸</button>
+    <div id="flash"></div>
+  </body>
+</html>
